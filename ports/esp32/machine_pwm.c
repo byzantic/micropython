@@ -34,8 +34,11 @@
 #include "py/mphal.h"
 #include "driver/ledc.h"
 #include "esp_err.h"
-#include "esp_clk_tree.h"
 #include "soc/gpio_sig_map.h"
+
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 1, 0)
+#include "esp_clk_tree.h"
+#endif
 
 #define PWM_DBG(...)
 // #define PWM_DBG(...) mp_printf(&mp_plat_print, __VA_ARGS__); mp_printf(&mp_plat_print, "\n");
@@ -153,7 +156,13 @@ static void pwm_deinit(int channel_idx) {
         int timer_idx = chans[channel_idx].timer_idx;
         if (timer_idx != -1) {
             if (!is_timer_in_use(channel_idx, timer_idx)) {
-                check_esp_err(ledc_timer_rst(TIMER_IDX_TO_MODE(timer_idx), TIMER_IDX_TO_TIMER(timer_idx)));
+                check_esp_err(ledc_timer_pause(TIMER_IDX_TO_MODE(timer_idx), TIMER_IDX_TO_TIMER(timer_idx)));
+                ledc_timer_config_t timer_config = {
+                    .deconfigure = true,
+                    .speed_mode = TIMER_IDX_TO_MODE(timer_idx),
+                    .timer_num = TIMER_IDX_TO_TIMER(timer_idx),
+                };
+                check_esp_err(ledc_timer_config(&timer_config));
                 // Flag it unused
                 timers[chans[channel_idx].timer_idx].freq_hz = -1;
             }
@@ -209,6 +218,7 @@ static void configure_channel(machine_pwm_obj_t *self) {
 }
 
 static void set_freq(machine_pwm_obj_t *self, unsigned int freq, ledc_timer_config_t *timer) {
+    esp_err_t err;
     if (freq != timer->freq_hz) {
         // Configure the new frequency and resolution
         timer->freq_hz = freq;
@@ -228,10 +238,11 @@ static void set_freq(machine_pwm_obj_t *self, unsigned int freq, ledc_timer_conf
         }
         #endif
         uint32_t src_clk_freq = 0;
-        esp_err_t err = esp_clk_tree_src_get_freq_hz(timer->clk_cfg, ESP_CLK_TREE_SRC_FREQ_PRECISION_CACHED, &src_clk_freq);
+        err = esp_clk_tree_src_get_freq_hz(timer->clk_cfg, ESP_CLK_TREE_SRC_FREQ_PRECISION_CACHED, &src_clk_freq);
         if (err != ESP_OK) {
             mp_raise_msg_varg(&mp_type_ValueError, MP_ERROR_TEXT("unable to query source clock frequency %d"), (int)timer->clk_cfg);
         }
+
         timer->duty_resolution = ledc_find_suitable_duty_resolution(src_clk_freq, timer->freq_hz);
 
         // Set frequency
@@ -630,7 +641,13 @@ static void mp_machine_pwm_freq_set(machine_pwm_obj_t *self, mp_int_t freq) {
 
         if (!current_in_use) {
             // Free the old timer
-            check_esp_err(ledc_timer_rst(self->mode, self->timer));
+            check_esp_err(ledc_timer_pause(self->mode, self->timer));
+            ledc_timer_config_t timer_config = {
+                .deconfigure = true,
+                .speed_mode = self->mode,
+                .timer_num = self->timer,
+            };
+            check_esp_err(ledc_timer_config(&timer_config));
             // Flag it unused
             timers[current_timer_idx].freq_hz = -1;
         }
